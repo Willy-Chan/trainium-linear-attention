@@ -17,7 +17,7 @@ def _check_nki():
     global _nki_available
     if _nki_available is None:
         try:
-            from based_linear_attn_nki import get_based_attn_kernel  # noqa: F401
+            from kernels.nki_attention import get_based_attn_kernel  # noqa: F401
             _nki_available = True
         except Exception:
             _nki_available = False
@@ -99,7 +99,7 @@ def solution_nki(q, k, v, eps=1e-6):
     q, k, v: (b, h, t, d)
     Returns: (b, h, t, d)
     """
-    from based_linear_attn_nki import get_based_attn_kernel
+    from kernels.nki_attention import get_based_attn_kernel
 
     b, h, t, d = q.shape
     scale = 1.0 / math.sqrt(d)

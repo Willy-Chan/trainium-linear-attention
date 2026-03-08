@@ -16,7 +16,7 @@ import torch.nn as nn
 import torch_xla
 import torch_xla.core.xla_model as xm
 
-from parallel_based_linear_attn import ref_based_attn, solution_nki
+from kernels.pytorch_attention import ref_based_attn, solution_nki
 
 device = xm.xla_device()
 

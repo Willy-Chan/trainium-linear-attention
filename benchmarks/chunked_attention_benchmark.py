@@ -6,7 +6,7 @@ import torch
 import torch_xla
 import torch_xla.core.xla_model as xm
 
-from based_linear_attn_nki_CHUNKED import get_chunked_attn_kernel
+from kernels.nki_attention_chunked import get_chunked_attn_kernel
 
 
 # Easy-to-edit defaults
