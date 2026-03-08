@@ -12,11 +12,11 @@ from based_linear_attn_nki_CHUNKED import get_chunked_attn_kernel
 # Easy-to-edit defaults
 DEFAULT_B = 1
 DEFAULT_H = 2
-DEFAULT_S = 2048
+DEFAULT_S = 256
 DEFAULT_D = 64
 DEFAULT_CHUNK = 64
 DEFAULT_WARMUP = 5
-DEFAULT_ITERS = 50
+DEFAULT_ITERS = 10
 DEFAULT_EPS = 1e-6
 
 
