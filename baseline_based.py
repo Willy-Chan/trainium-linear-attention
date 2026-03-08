@@ -1,10 +1,11 @@
 import math
+import time
 import torch
 import torch.nn as nn
 import torch_xla
 import torch_xla.core.xla_model as xm
 
-from parallel_based_linear_attn import solution
+from parallel_based_linear_attn import solution, solution_nki
 
 device = xm.xla_device()
 
@@ -166,8 +167,11 @@ class TrainiumBasedLinearAttentionSOLUTION(nn.Module):
 # --- Compare only the linear attention kernel (reference vs solution()) ---
 if __name__ == "__main__":
     dim, heads, feature_dim = 32, 2, 8
-    batch, seq_len = 1, 16
+    batch, seq_len = 1, 2048
     causal, eps = True, 1e-12
+    # NKI performance benchmark
+    warmup_iters = 5
+    bench_iters = 100
 
     # One model only to get q,k,v (projections + feature map). We ignore o_proj for the check.
     model = TrainiumBasedLinearAttention(
@@ -189,16 +193,17 @@ if __name__ == "__main__":
     else:
         y_ref = (q * (k * v).sum(2, True)).sum(-1) / ((q * k.sum(2, True)).sum(-1) + eps)
 
-    # solution() linear attention kernel
+    # solution() linear attention kernel (NKI when available, else PyTorch)
     y_sol = solution(q, k, v, causal=causal, eps=eps)
 
     torch_xla.sync()
 
-    # --- CORRECTNESS: compare only kernel outputs (b, h, t, d) ---
-    ok = torch.allclose(y_ref, y_sol, rtol=1e-5, atol=1e-5)
-    max_diff = (y_ref - y_sol).abs().max().item()
     sep = "=" * 60
     print(f"Kernel output shapes: y_ref {y_ref.shape}, y_sol {y_sol.shape}")
+
+    # --- 1) General correctness: reference vs solution() ---
+    ok = torch.allclose(y_ref, y_sol, rtol=1e-5, atol=1e-5)
+    max_diff = (y_ref - y_sol).abs().max().item()
     if ok:
         print(f"\n{sep}")
         print("  ***  CORRECT: reference and solution() kernels match  ***")
@@ -208,4 +213,63 @@ if __name__ == "__main__":
         print(f"\n{sep}")
         print("  ***  FAIL: reference and solution() kernels DIFFER  ***")
         print(f"  max |y_ref - y_sol| = {max_diff:.2e}")
+        print(sep)
+
+    # --- 2) NKI-specific correctness and performance ---
+    nki_available = False
+    try:
+        y_nki = solution_nki(q, k, v, eps=eps)
+        nki_available = True
+    except RuntimeError as e:
+        if "not available" in str(e).lower():
+            print(f"\n  NKI kernel not available: {e}")
+            print("  Skipping NKI correctness and performance.")
+        else:
+            raise
+
+    if nki_available:
+        torch_xla.sync()
+        ok_nki = torch.allclose(y_ref, y_nki, rtol=1e-5, atol=1e-5)
+        max_diff_nki = (y_ref - y_nki).abs().max().item()
+        print(f"\n  --- NKI correctness ---")
+        if ok_nki:
+            print(f"  *** NKI CORRECT vs reference (max |diff| = {max_diff_nki:.2e}) ***")
+        else:
+            print(f"  *** NKI FAIL vs reference (max |diff| = {max_diff_nki:.2e}) ***")
+
+        # Reference (PyTorch) kernel performance
+        def ref_kernel():
+            if causal:
+                return (q * (k * v).cumsum(2)).sum(-1) / ((q * k.cumsum(2)).sum(-1) + eps)
+            return (q * (k * v).sum(2, True)).sum(-1) / ((q * k.sum(2, True)).sum(-1) + eps)
+
+        print(f"\n  --- Performance (warmup={warmup_iters}, iters={bench_iters}) ---")
+        for _ in range(warmup_iters):
+            ref_kernel()
+        torch_xla.sync()
+        start_ref = time.perf_counter()
+        for _ in range(bench_iters):
+            ref_kernel()
+        torch_xla.sync()
+        elapsed_ref = time.perf_counter() - start_ref
+        ref_mean_ms = 1000.0 * elapsed_ref / bench_iters
+        print(f"  Reference (PyTorch) mean time: {ref_mean_ms:.3f} ms")
+
+        # NKI performance
+        for _ in range(warmup_iters):
+            solution_nki(q, k, v, eps=eps)
+        torch_xla.sync()
+        start_nki = time.perf_counter()
+        for _ in range(bench_iters):
+            solution_nki(q, k, v, eps=eps)
+        torch_xla.sync()
+        elapsed_nki = time.perf_counter() - start_nki
+        nki_mean_ms = 1000.0 * elapsed_nki / bench_iters
+        nki_tokens_per_sec = (batch * seq_len * bench_iters) / elapsed_nki
+        print(f"  NKI mean time: {nki_mean_ms:.3f} ms")
+        print(f"  NKI throughput: {nki_tokens_per_sec:.1f} tokens/s")
+
+        # Percent speedup: (ref - nki) / ref * 100 (positive = NKI faster)
+        pct_speedup = 100.0 * (elapsed_ref - elapsed_nki) / elapsed_ref
+        print(f"  NKI percent speedup vs reference: {pct_speedup:+.1f}%")
         print(sep)
