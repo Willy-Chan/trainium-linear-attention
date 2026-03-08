@@ -43,8 +43,6 @@ def _build_kernel(seq_len, dim, block_size):
     _half_bb = np.full((BLOCK, BLOCK), 0.5, dtype=np.float32)
     _ones_col = np.ones((BLOCK, 1), dtype=np.float32)
     _lower_mask = np.tril(_ones_bb)
-    _zeros_bd = np.zeros((BLOCK, D_PAD), dtype=np.float32)
-    _zeros_b1 = np.zeros((BLOCK, 1), dtype=np.float32)
 
     @nki.jit
     def kernel(q_scaled, k_input, v_input):
@@ -63,51 +61,51 @@ def _build_kernel(seq_len, dim, block_size):
         c_half = nl.shared_constant(_half_bb, dtype=nl.float32)
         c_col = nl.shared_constant(_ones_col, dtype=nl.float32)
         c_mask = nl.shared_constant(_lower_mask, dtype=nl.float32)
-        c_z_bd = nl.shared_constant(_zeros_bd, dtype=nl.float32)
-        c_z_b1 = nl.shared_constant(_zeros_b1, dtype=nl.float32)
-
-        for i in range(NUM_BLOCKS):
+        for i in nl.affine_range(NUM_BLOCKS):
             q_off = i * BLOCK
-            # Q loaded normally: (par=BLOCK_t, free=D_PAD) = (64, 128)
             q_block = nl.load(q_scaled[q_off:q_off + BLOCK, :])
 
-            acc_num = nl.load(c_z_bd)
-            acc_den = nl.load(c_z_b1)
+            # Allocated ONCE per hardware loop iteration
+            acc_num = nl.zeros((BLOCK, D_PAD), dtype=nl.float32, buffer=nl.psum)
+            acc_den = nl.zeros((BLOCK, 1), dtype=nl.float32, buffer=nl.psum)
 
-            for j in range(i + 1):
+            # Off-diagonal causal blocks j < i
+            for j in nl.affine_range(i):
                 k_off = j * BLOCK
-                # K loaded transposed: (par=D_PAD, free=BLOCK_s) = (128, 64)
                 k_t = nl.load_transpose2d(k_input[k_off:k_off + BLOCK, :])
-                # V loaded normally: (par=BLOCK_s, free=D_PAD) = (64, 128)
                 v_j = nl.load(v_input[k_off:k_off + BLOCK, :])
 
-                # A[t,s] = Q[t,:] @ K[s,:].T
-                # q_block (64, 128) @ k_t (128, 64) -> (64, 64)
                 sc = nl.copy(nl.matmul(q_block, k_t))
-
-                # polynomial: phi(x) = 1 + x + 0.5*x^2, with causal mask
-                # Lower-tri for diagonal block (j==i), all-ones for j<i.
-                block_mask = nl.load(c_mask) if j == i else nl.load(c_ones)
                 sq = nl.multiply(sc, sc)
                 half_sq = nl.multiply(sq, nl.load(c_half))
                 poly = nl.multiply(
                     nl.add(nl.add(nl.load(c_ones), sc), half_sq),
-                    block_mask,
+                    nl.load(c_ones), # block_mask
                 )
 
-                # numerator: poly @ V -> (BLOCK_t, D_PAD) = (64, 128)
-                # poly (64, 64) @ v_j (64, 128) -> (64, 128)
-                acc_num[...] = nl.add(acc_num,
-                                      nl.copy(nl.matmul(poly, v_j)))
+                # Use += as NKI expects for native PSUM accumulation
+                acc_num += nl.matmul(poly, v_j)
+                acc_den += nl.matmul(poly, nl.load(c_col))
 
-                # denominator: poly @ ones_col -> (BLOCK_t, 1) = (64, 1)
-                # poly (64, 64) @ ones (64, 1) -> (64, 1)
-                acc_den[...] = nl.add(acc_den,
-                                      nl.copy(nl.matmul(poly, nl.load(c_col))))
+            # Diagonal causal block j == i
+            k_off = i * BLOCK
+            k_t = nl.load_transpose2d(k_input[k_off:k_off + BLOCK, :])
+            v_j = nl.load(v_input[k_off:k_off + BLOCK, :])
+            
+            sc = nl.copy(nl.matmul(q_block, k_t))
+            sq = nl.multiply(sc, sc)
+            half_sq = nl.multiply(sq, nl.load(c_half))
+            poly = nl.multiply(
+                nl.add(nl.add(nl.load(c_ones), sc), half_sq),
+                nl.load(c_mask),
+            )
+            
+            # Use += as NKI expects for native PSUM accumulation
+            acc_num += nl.matmul(poly, v_j)
+            acc_den += nl.matmul(poly, nl.load(c_col))
 
-            nl.store(num_out[q_off:q_off + BLOCK, :], value=acc_num)
-            nl.store(den_out[q_off:q_off + BLOCK, :], value=acc_den)
-
+            nl.store(num_out[q_off:q_off + BLOCK, :], value=nl.copy(acc_num))
+            nl.store(den_out[q_off:q_off + BLOCK, :], value=nl.copy(acc_den))
         return num_out, den_out
 
     return kernel, SEQ_PAD, D_PAD
