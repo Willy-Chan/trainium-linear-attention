@@ -73,11 +73,19 @@ class TrainiumBasedLinearAttentionNKI(nn.Module):
 # Kernel-level correctness and performance
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    # Moderate size so NKI tiled kernel can show speedup (PyTorch does full seq_len^2)
-    batch, heads, seq_len, head_dim = 1, 2, 2048, 64
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--b", type=int, default=1)
+    parser.add_argument("--heads", type=int, default=2)
+    parser.add_argument("--s", type=int, default=2048)
+    parser.add_argument("--d", type=int, default=64)
+    parser.add_argument("--warmup", type=int, default=5)
+    parser.add_argument("--iters", type=int, default=50)
+    args = parser.parse_args()
+    batch, heads, seq_len, head_dim = args.b, args.heads, args.s, args.d
     eps = 1e-6
-    warmup_iters = 5
-    bench_iters = 50
+    warmup_iters = args.warmup
+    bench_iters = args.iters
 
     sep = "=" * 60
     print(f"Config: batch={batch}, heads={heads}, seq_len={seq_len}, "

@@ -105,7 +105,7 @@ def chunked_nki_numerator(q, k, v, chunk_size=64):
     k_phi = taylor_feature_map(k.float())
     feat_dim = q_phi.shape[-1]
     kernel, seq_pad, feat_pad, v_pad = get_chunked_attn_kernel(
-        t, feat_dim, d, chunk_size=chunk_size
+        t, feat_dim, d, num_heads=bh, chunk_size=chunk_size
     )
 
     q_flat = q_phi.reshape(bh, t, feat_dim)
@@ -121,11 +121,9 @@ def chunked_nki_numerator(q, k, v, chunk_size=64):
     k_pad = pad(k_flat, seq_pad, feat_pad)
     v_pad_t = pad(v_flat, seq_pad, v_pad)
 
-    outs = []
-    for i in range(bh):
-        out_i = kernel(q_pad[i], k_pad[i], v_pad_t[i])
-        outs.append(out_i[:t, :d])
-    return torch.stack(outs, dim=0).reshape(b, h, t, d).to(q.dtype)
+    # Single kernel call for all batch*heads
+    out = kernel(q_pad, k_pad, v_pad_t)
+    return out[:, :t, :d].reshape(b, h, t, d).to(q.dtype)
 
 
 def bench(fn, warmup, iters):

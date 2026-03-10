@@ -24,58 +24,6 @@ def _check_nki():
     return _nki_available
 
 
-# def ref_based_attn(q, k, v, eps=1e-6):
-#     """
-#     Reference PyTorch path that mirrors the current NKI kernel behavior.
-#     q, k, v: (b, h, t, d)
-#     Returns: (b, h, t, d)
-#     """
-#     b, h, t, d = q.shape
-#     bh = b * h
-#     block = 64
-#     seq_pad = ((t + block - 1) // block) * block
-#     d_pad = ((d + block - 1) // block) * block
-#     if d_pad < 128:
-#         d_pad = 128
-
-#     dev = q.device
-#     q_scaled = (q * (1.0 / math.sqrt(d))).float().reshape(bh, t, d)
-#     k_flat = k.float().reshape(bh, t, d)
-#     v_flat = v.float().reshape(bh, t, d)
-
-#     def pad(x, rows, cols):
-#         out = torch.zeros(bh, rows, cols, device=dev, dtype=torch.float32)
-#         out[:, : x.shape[1], : x.shape[2]] = x
-#         return out
-
-#     q_pad = pad(q_scaled, seq_pad, d_pad)
-#     k_pad = pad(k_flat, seq_pad, d_pad)
-#     v_pad = pad(v_flat, seq_pad, d_pad)
-
-#     num = torch.zeros(bh, seq_pad, d_pad, device=dev, dtype=torch.float32)
-#     den = torch.zeros(bh, seq_pad, 1, device=dev, dtype=torch.float32)
-#     tril = torch.tril(torch.ones(block, block, device=dev, dtype=torch.float32))
-#     ones_col = torch.ones(bh, block, 1, device=dev, dtype=torch.float32)
-
-#     for i_off in range(0, seq_pad, block):
-#         q_blk = q_pad[:, i_off : i_off + block, :]
-#         acc_num = torch.zeros(bh, block, d_pad, device=dev, dtype=torch.float32)
-#         acc_den = torch.zeros(bh, block, 1, device=dev, dtype=torch.float32)
-#         for j_off in range(0, i_off + block, block):
-#             k_blk = k_pad[:, j_off : j_off + block, :]
-#             v_blk = v_pad[:, j_off : j_off + block, :]
-#             sc = torch.matmul(q_blk, k_blk.transpose(-2, -1))
-#             poly = 1.0 + sc + 0.5 * sc * sc
-#             if j_off == i_off:
-#                 poly = poly * tril
-#             acc_num = acc_num + torch.matmul(poly, v_blk)
-#             acc_den = acc_den + torch.matmul(poly, ones_col)
-#         num[:, i_off : i_off + block, :] = acc_num
-#         den[:, i_off : i_off + block, :] = acc_den
-
-#     out = num[:, :t, :d] / (den[:, :t, :] + eps)
-#     return out.reshape(b, h, t, d).to(q.dtype)
-
 def ref_based_attn(q, k, v, eps=1e-6):
     """
     Reference PyTorch BASED causal attention with polynomial activation.
@@ -102,20 +50,21 @@ def solution_nki(q, k, v, eps=1e-6):
     from kernels.nki_attention import get_based_attn_kernel
 
     b, h, t, d = q.shape
+    bh = b * h
     scale = 1.0 / math.sqrt(d)
 
-    kernel, SEQ_PAD, D_PAD = get_based_attn_kernel(t, d)
+    kernel, SEQ_PAD, D_PAD = get_based_attn_kernel(t, d, num_heads=bh)
 
-    q_scaled = (q * scale).float().reshape(b * h, t, d)
-    k_flat = k.float().reshape(b * h, t, d)
-    v_flat = v.float().reshape(b * h, t, d)
+    q_scaled = (q * scale).float().reshape(bh, t, d)
+    k_flat = k.float().reshape(bh, t, d)
+    v_flat = v.float().reshape(bh, t, d)
     dev = q.device
 
     def pad(x, rows, cols):
-        bh, r, c = x.shape
+        bh_, r, c = x.shape
         if r >= rows and c >= cols:
             return x
-        out = torch.zeros(bh, rows, cols, device=dev, dtype=torch.float32)
+        out = torch.zeros(bh_, rows, cols, device=dev, dtype=torch.float32)
         out[:, :r, :c] = x
         return out
 
@@ -123,14 +72,10 @@ def solution_nki(q, k, v, eps=1e-6):
     k_pad = pad(k_flat, SEQ_PAD, D_PAD)
     v_pad = pad(v_flat, SEQ_PAD, D_PAD)
 
-    outs = []
-    for i in range(b * h):
-        num, den = kernel(q_pad[i], k_pad[i], v_pad[i])
-        out_i = num[:t, :d] / (den[:t] + eps)
-        outs.append(out_i)
-
-    y = torch.stack(outs, dim=0).reshape(b, h, t, d)
-    return y.to(q.dtype)
+    # Single kernel call for all batch*heads
+    num, den = kernel(q_pad, k_pad, v_pad)
+    y = num[:, :t, :d] / (den[:, :t, :] + eps)
+    return y.reshape(b, h, t, d).to(q.dtype)
 
 
 def solution(q, k, v, eps=1e-6):
@@ -145,3 +90,4 @@ def solution(q, k, v, eps=1e-6):
         except Exception:
             pass
     return ref_based_attn(q, k, v, eps=eps)
+
